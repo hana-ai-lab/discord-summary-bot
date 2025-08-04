@@ -15,9 +15,8 @@ COPY requirements.txt .
 # Pythonパッケージのインストール
 RUN pip install --no-cache-dir -r requirements.txt
 
-# アプリケーションファイルをコピー
+# アプリケーションファイルをコピー（.envは除外）
 COPY bot.py .
-COPY .env .
 
 # ボットを実行
 CMD ["python", "-u", "bot.py"]
