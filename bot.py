@@ -3,8 +3,7 @@ from discord.ext import commands, tasks
 from datetime import datetime, timedelta, time, timezone
 import asyncio
 from collections import defaultdict, deque
-from google import genai  # 新しいGoogle Gen AI SDK
-from google.genai import types  # types のインポート
+from openai import AsyncOpenAI  # OpenAI SDK
 import os
 from dotenv import load_dotenv
 import psutil
@@ -13,27 +12,22 @@ import gc
 from concurrent.futures import TimeoutError
 
 # .envファイルから環境変数を読み込み
-
 load_dotenv()
 
 # 環境変数から設定を読み込み
-
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
-GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
 # 環境変数が設定されているか確認
-
 if not DISCORD_BOT_TOKEN:
     raise ValueError("DISCORD_BOT_TOKENが設定されていません。.envファイルを確認してください。")
-if not GOOGLE_API_KEY:
-    raise ValueError("GOOGLE_API_KEYが設定されていません。.envファイルを確認してください。")
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEYが設定されていません。.envファイルを確認してください。")
 
-# Google Gen AI SDKのクライアント作成（最新SDK仕様）
-
-client = genai.Client(api_key=GOOGLE_API_KEY)
+# OpenAI クライアントの作成
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 # Botの設定
-
 intents = discord.Intents.default()
 intents.message_content = True  # メッセージ内容を読むために必要
 intents.guilds = True
@@ -41,7 +35,6 @@ intents.guilds = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # 設定項目
-
 MAX_MESSAGES_PER_SUMMARY = int(os.getenv('MAX_MESSAGES_PER_SUMMARY', 100))  # 1回の要約に含める最大メッセージ数
 BOT_CHANNEL_NAME = os.getenv('BOT_CHANNEL_NAME', '🎀サマリちゃん🎀')  # Bot用チャンネルの名前
 API_TIMEOUT = int(os.getenv('API_TIMEOUT', 60))  # API呼び出しのタイムアウト（秒）
@@ -49,13 +42,10 @@ API_RETRY_COUNT = int(os.getenv('API_RETRY_COUNT', 2))  # API呼び出しのリ�
 PARALLEL_SUMMARY = os.getenv('PARALLEL_SUMMARY', 'true').lower() == 'true'  # 並列処理の有効/無効
 
 # 使用するモデル（環境変数で設定可能）
-
-MODEL_NAME = os.getenv('GEMINI_MODEL', 'gemini-2.5-pro')
+MODEL_NAME = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
 
 # 要約スケジュール（時刻と要約期間）
-
 # JST（日本時間）の6時、12時、18時に投稿されるようにUTCで設定
-
 SUMMARY_SCHEDULE = [
     # JST 6:00 (UTC 21:00 of previous day)
     {"hour": 21, "minute": 0, "hours_back": 24, "description": "前日の要約", "color": discord.Color.purple()},
@@ -66,7 +56,6 @@ SUMMARY_SCHEDULE = [
 ]
 
 # 週次サマリーのスケジュール（月曜日の朝6時）
-
 WEEKLY_SUMMARY_SCHEDULE = {
     "weekday": 0,  # 月曜日（UTCでは日曜日の21時）
     "hour": 21,    # UTC 21:00 = JST 6:00
@@ -77,17 +66,13 @@ WEEKLY_SUMMARY_SCHEDULE = {
 }
 
 # サーバーごとの設定を保存
-
 server_configs = {}
 
 # メッセージを保存する辞書（サーバーID -> チャンネルID -> メッセージリスト）
-
 # 1週間分のメッセージを保持するためにタイムスタンプ付きで管理
-
 message_buffers = defaultdict(lambda: defaultdict(lambda: deque()))
 
 # API使用量追跡用
-
 daily_api_calls = 0
 last_reset_date = datetime.now().date()
 
@@ -131,7 +116,7 @@ def cleanup_old_messages():
                 message_buffers[guild_id][channel_id].popleft()
 
 def generate_simple_summary(messages_by_channel):
-    """Gemini APIが使えない場合の簡易要約"""
+    """OpenAI APIが使えない場合の簡易要約"""
     summaries = []
 
     for channel_name, messages in messages_by_channel.items():
@@ -195,13 +180,14 @@ async def summarize_all_channels_async(messages_by_channel, is_weekly=False, gui
         
         # プロンプトを構築（週次サマリー用の特別な指示を追加）
         if is_weekly:
-            prompt = f"""以下は'{guild_name}'サーバーの1週間分のDiscordチャンネルの会話です。1週間の活動を俯瞰的に要約してください。
-```
+            system_prompt = f"""あなたは'{guild_name}'サーバーのDiscordチャットログを要約する専門家です。
+1週間分の活動を俯瞰的に分析し、簡潔で読みやすい要約を作成してください。"""
+            
+            user_prompt = f"""以下は1週間分のDiscordチャンネルの会話です。
 
 {full_conversation}
 
 重要な指示：
-
 - 1週間の活動を総括的に要約
 - 主要なトピック、決定事項、進捗状況を整理
 - チャンネルごとの活動傾向を分析
@@ -212,18 +198,19 @@ async def summarize_all_channels_async(messages_by_channel, is_weekly=False, gui
 - 登場する人物のDisplay Nameには敬称として「さん」を付けてください
 
 安全性に関する指示：
-
 - 不適切、暴力的、差別的な内容が含まれる会話は、その部分を除外または一般化して要約してください
 - センシティブな話題は建設的な側面のみを抽出してください
 - 個人攻撃や中傷的な内容は無視してください
 - 全体的にポジティブで建設的な要約を心がけてください"""
         else:
-            prompt = f"""以下の'{guild_name}'サーバーのDiscordチャンネルの会話を要約してください。
+            system_prompt = f"""あなたは'{guild_name}'サーバーのDiscordチャットログを要約する専門家です。
+全チャンネルを俯瞰して統合的な要約を作成してください。"""
+            
+            user_prompt = f"""以下のDiscordチャンネルの会話を要約してください。
 
 {full_conversation}
 
 重要な指示：
-
 - 全チャンネルを俯瞰して統合的に要約する
 - 「#チャンネル名で誰が何を話したか」を明確に記載
 - 重要な情報、決定事項、注目すべきトピックを優先
@@ -233,43 +220,38 @@ async def summarize_all_channels_async(messages_by_channel, is_weekly=False, gui
 - 登場する人物のDisplay Nameには敬称として「さん」を付けてください
 
 安全性に関する指示：
-
 - 不適切、暴力的、差別的な内容が含まれる会話は、その部分を除外または一般化して要約してください
 - センシティブな話題は建設的な側面のみを抽出してください
 - 個人攻撃や中傷的な内容は無視してください
 - 全体的にポジティブで建設的な要約を心がけてください"""
 
-        # API呼び出しをタイムアウト付きで実行
-        async def api_call():
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
-                None,
-                lambda: client.models.generate_content(
-                    model=MODEL_NAME,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=0.3,
-                        max_output_tokens=3000,
-                    ),
-                )
-            )
-
-        # タイムアウト付きでAPI呼び出し
-        response = await asyncio.wait_for(api_call(), timeout=API_TIMEOUT)
+        # OpenAI API呼び出し
+        response = await asyncio.wait_for(
+            openai_client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=3000,
+            ),
+            timeout=API_TIMEOUT
+        )
 
         daily_api_calls += 1
 
         # レスポンスのテキストを取得
-        if response.text:
-            return response.text
+        if response.choices and response.choices[0].message.content:
+            return response.choices[0].message.content
         else:
             return "要約の生成に失敗しました。"
 
     except asyncio.TimeoutError:
-        print(f"Gemini API タイムアウト: {API_TIMEOUT}秒を超えました")
+        print(f"OpenAI API タイムアウト: {API_TIMEOUT}秒を超えました")
         return generate_simple_summary(messages_by_channel)
     except Exception as e:
-        print(f"Gemini API エラー: {e}")
+        print(f"OpenAI API エラー: {e}")
         return generate_simple_summary(messages_by_channel)
 
 async def get_or_create_bot_channel(guild):
@@ -669,7 +651,7 @@ async def bot_status(ctx):
 
     embed.add_field(
         name="AI要約",
-        value=f"{MODEL_NAME} 使用中" if GOOGLE_API_KEY else "未設定",
+        value=f"{MODEL_NAME} 使用中" if OPENAI_API_KEY else "未設定",
         inline=True
     )
 
@@ -747,26 +729,14 @@ async def api_usage(ctx):
         last_reset_date = datetime.now().date()
 
     embed = discord.Embed(
-        title="📊 Gemini API 使用状況",
+        title="📊 OpenAI API 使用状況",
         color=discord.Color.blue()
     )
 
     embed.add_field(
         name="本日の使用回数",
-        value=f"{daily_api_calls} / 1,500回",
+        value=f"{daily_api_calls}回",
         inline=False
-    )
-
-    embed.add_field(
-        name="使用率",
-        value=f"{(daily_api_calls / 1500 * 100):.1f}%",
-        inline=True
-    )
-
-    embed.add_field(
-        name="残り回数",
-        value=f"{1500 - daily_api_calls}回",
-        inline=True
     )
 
     embed.add_field(
@@ -790,6 +760,13 @@ async def api_usage(ctx):
     embed.add_field(
         name="サーバー統計",
         value=f"総数: {total_servers}\nアクティブ: {active_servers}",
+        inline=False
+    )
+
+    # 注: OpenAI APIには日次の固定制限はないため、使用量の制限は料金ベースになります
+    embed.add_field(
+        name="注意",
+        value="OpenAI APIは従量課金制です。使用量に応じて料金が発生します。",
         inline=False
     )
 
@@ -952,6 +929,5 @@ async def check_permissions(ctx):
     await ctx.send(embed=embed)
 
 # Botを起動
-
 if __name__ == "__main__":
     bot.run(DISCORD_BOT_TOKEN)
