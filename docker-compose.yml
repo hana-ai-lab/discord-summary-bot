@@ -2,13 +2,41 @@ version: '3.8'
 
 services:
   discord-bot:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: discord-summary-bot:latest
     container_name: discord-summary-bot
     restart: unless-stopped
     environment:
       - TZ=Asia/Tokyo
+      # Discord Bot Token
+      # Discord Developer Portal (https://discord.com/developers/applications) から取得
+      - DISCORD_BOT_TOKEN=your_discord_bot_token
+      # OpenAI API Key
+      # OpenAI Platform (https://platform.openai.com/api-keys) から取得
+      - OPENAI_API_KEY=your_openai_api_key
+      # 使用するOpenAIモデル デフォルト: gpt-4o-mini
+      # 他のオプション: gpt-4o, gpt-4-turbo, gpt-3.5-turbo など
+      - OPENAI_MODEL=gpt-4o-mini
+      # Bot用チャンネルの名前 デフォルト: bot-summaries
+      # このチャンネルが自動的に作成され、要約が投稿されます
+      - BOT_CHANNEL_NAME=🎀サマリちゃん🎀
+      # 1回の要約に含める最大メッセージ数 デフォルト: 500
+      - MAX_MESSAGES_PER_SUMMARY=1000
+      # API呼び出しのタイムアウト（秒） デフォルト: 60
+      # OpenAI APIの応答が遅い場合は、この値を増やしてください
+      # 推奨値: 60-120秒（大量のメッセージがある場合）
+      - API_TIMEOUT=60
+      # API呼び出しのリトライ回数 デフォルト: 2
+      # タイムアウトやエラー時に何回リトライするか
+      - API_RETRY_COUNT=2
+      # 並列処理の有効/無効 デフォルト: true
+      # true: 複数サーバーの要約を同時に処理（高速）
+      # false: 順番に処理（安定性重視）
+      - PARALLEL_SUMMARY=false
     volumes:
-      - ./logs:/app/logs  # ログファイル用（オプション）
+      - ./logs:/app/logs
     logging:
       driver: "json-file"
       options:
