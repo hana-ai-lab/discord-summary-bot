@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.vscode/
+.idea/
+.git/
+.gitignore
+README.md
+DISCORD_SETUP.md
+*.log
+logs/
+Procfile
+runtime.txt
